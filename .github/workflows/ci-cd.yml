@@ -1,0 +1,220 @@
+# ======================================================================
+#  File: ci-cd.yml
+#  Project: Smart Solar Microgrid Trading System (SE4040)
+#  Description: CI/CD pipeline for the whole system.
+#    CI (Continuous Integration) - every push / pull request to dev or
+#      master automatically builds and checks:
+#        1. the C# ASP.NET Web API      (backend/SmartSolarMicrogrid.Api)
+#        2. the React web application   (web/SmartSolarMicrogrid.Web)
+#        3. the native Android app      (android/SmartSolarMicrogridMobile)
+#      Each job saves its output (API publish folder, web build, APK) as a
+#      downloadable "artifact" on the Actions run page.
+#    CD (Continuous Deployment) - after a push to master (or a manual
+#      "Run workflow" on master), if every build
+#      passed, the API is copied to IIS on the team's Windows PC through a
+#      self-hosted GitHub runner. This job only runs when the repository
+#      variable ENABLE_IIS_DEPLOY is set to "true".
+#  Location: .github/workflows/ci-cd.yml
+# ======================================================================
+
+name: CI/CD Pipeline
+
+# ---- WHEN the pipeline runs ----
+on:
+  push:
+    branches: [master, dev]          # code merged / pushed to the main branches
+  pull_request:
+    branches: [master, dev]          # every pull request into those branches
+  workflow_dispatch:                 # "Run workflow" button on the Actions tab
+
+# If someone pushes again while an older run is still going on the same
+# branch, cancel the old run (saves time and free minutes).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The pipeline only needs to read the code.
+permissions:
+  contents: read
+
+jobs:
+  # ====================================================================
+  # JOB 1 - Backend: C# ASP.NET Web API (.NET 10)
+  # ====================================================================
+  backend:
+    name: Backend API (.NET 10)
+    runs-on: ubuntu-latest           # a fresh virtual machine from GitHub
+    defaults:
+      run:
+        working-directory: backend/SmartSolarMicrogrid.Api
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v7
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore NuGet packages
+        run: dotnet restore
+
+      - name: Build (Release)
+        run: dotnet build --configuration Release --no-restore
+
+      # Same command as deployment/iis/README.md, but into a folder on the
+      # GitHub machine. The output (dll + web.config) is what IIS runs.
+      - name: Publish for IIS
+        run: dotnet publish --configuration Release --no-restore --output "${{ github.workspace }}/api-publish"
+
+      - name: Save the published API as an artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: api-publish
+          path: api-publish
+          retention-days: 14
+
+  # ====================================================================
+  # JOB 2 - Web application: React + Vite + Tailwind
+  # ====================================================================
+  web:
+    name: Web App (React)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web/SmartSolarMicrogrid.Web
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v7
+
+      - name: Install Node.js 22
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/SmartSolarMicrogrid.Web/package-lock.json
+
+      - name: Install packages (exact versions from package-lock.json)
+        run: npm ci
+
+      - name: Lint (check code quality)
+        run: npm run lint
+
+      - name: Build production files
+        run: npm run build
+
+      - name: Save the web build as an artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-dist
+          path: web/SmartSolarMicrogrid.Web/dist
+          retention-days: 14
+
+  # ====================================================================
+  # JOB 3 - Android app (native, Gradle)
+  # ====================================================================
+  android:
+    name: Android App
+    runs-on: ubuntu-latest           # GitHub's Ubuntu machine has the Android SDK
+    defaults:
+      run:
+        working-directory: android/SmartSolarMicrogridMobile
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v7
+
+      - name: Install Java 21 (same as Android Studio)
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle (with caching)
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Make the Gradle wrapper executable
+        run: chmod +x gradlew
+
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest --stacktrace
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Save the APK as an artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-debug-apk
+          path: android/SmartSolarMicrogridMobile/app/build/outputs/apk/debug/*.apk
+          retention-days: 14
+
+  # ====================================================================
+  # JOB 4 - CD: deploy the API to IIS (self-hosted Windows runner)
+  # Runs only when:
+  #   - all three build jobs passed, AND
+  #   - it is a push to master, or the "Run workflow" button was used
+  #     on master (never for pull requests), AND
+  #   - the repository variable ENABLE_IIS_DEPLOY is "true".
+  # Otherwise it shows as "skipped", which is normal.
+  # ====================================================================
+  deploy-iis:
+    name: Deploy API to IIS
+    needs: [backend, web, android]
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/master' && vars.ENABLE_IIS_DEPLOY == 'true'
+    runs-on: [self-hosted, windows]  # the team's Windows PC that runs IIS
+    env:
+      SITE: SmartSolarApi                       # same names as deploy-iis.bat
+      PUBLISH_DIR: C:\inetpub\SmartSolarApi
+      API_URL: http://localhost:5235/api/stations
+    steps:
+      - name: Download the published API from the backend job
+        uses: actions/download-artifact@v8
+        with:
+          name: api-publish
+          path: api-publish
+
+      - name: Stop the IIS site and application pool
+        shell: powershell
+        run: |
+          $appcmd = "$env:windir\system32\inetsrv\appcmd.exe"
+          & $appcmd stop site "$env:SITE"
+          & $appcmd stop apppool "$env:SITE"
+          Start-Sleep -Seconds 5
+          exit 0   # do not fail if they were already stopped
+
+      # robocopy copies the new files. /XF keeps the server-only
+      # appsettings.Production.json (MongoDB password) untouched.
+      - name: Copy the new API files to IIS
+        shell: powershell
+        run: |
+          robocopy api-publish "$env:PUBLISH_DIR" /E /XF appsettings.Production.json /R:3 /W:5 /NP
+          if ($LASTEXITCODE -ge 8) { Write-Error "robocopy failed ($LASTEXITCODE)"; exit 1 }
+          exit 0   # robocopy codes 0-7 mean success
+
+      - name: Start the IIS site and application pool
+        shell: powershell
+        run: |
+          $appcmd = "$env:windir\system32\inetsrv\appcmd.exe"
+          & $appcmd start apppool "$env:SITE"
+          & $appcmd start site "$env:SITE"
+          exit 0
+
+      # Same test as check-iis.bat: the API must return station data
+      # from MongoDB. Tries 6 times, 10 seconds apart.
+      - name: Health check - call the live API
+        shell: powershell
+        run: |
+          for ($i = 1; $i -le 6; $i++) {
+            try {
+              $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 $env:API_URL
+              if ($r.Content -match 'success.{1,3}true') {
+                Write-Host "API is up and returned data from MongoDB."
+                exit 0
+              }
+            } catch {
+              Write-Host "Attempt $i failed: $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds 10
+          }
+          Write-Error "API did not respond correctly at $env:API_URL"
+          exit 1
