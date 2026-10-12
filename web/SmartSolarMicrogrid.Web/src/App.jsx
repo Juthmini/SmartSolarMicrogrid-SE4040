@@ -6,6 +6,7 @@
  * Description: Main application component with routing configuration.
  * Date: 2026-09-14
  */
+// workflow
 
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
