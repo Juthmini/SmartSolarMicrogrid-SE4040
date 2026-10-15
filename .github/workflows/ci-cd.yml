@@ -5,6 +5,7 @@
 #    CI (Continuous Integration) - every push / pull request to dev or
 #      master automatically builds and checks:
 #        1. the C# ASP.NET Web API      (backend/SmartSolarMicrogrid.Api)
+#           + its unit tests            (backend/SmartSolarMicrogrid.Api.Tests)
 #        2. the React web application   (web/SmartSolarMicrogrid.Web)
 #        3. the native Android app      (android/SmartSolarMicrogridMobile)
 #      Each job saves its output (API publish folder, web build, APK) as a
@@ -61,6 +62,12 @@ jobs:
 
       - name: Build (Release)
         run: dotnet build --configuration Release --no-restore
+
+      # Runs the xUnit business-logic tests in backend/SmartSolarMicrogrid.Api.Tests
+      # (7-day rule, 12-hour rule, station deactivation, NIC rules...).
+      # If any test fails, this job turns red and nothing is deployed.
+      - name: Run unit tests (business logic)
+        run: dotnet test ../SmartSolarMicrogrid.Api.Tests --configuration Release --logger "console;verbosity=normal"
 
       # Same command as deployment/iis/README.md, but into a folder on the
       # GitHub machine. The output (dll + web.config) is what IIS runs.
